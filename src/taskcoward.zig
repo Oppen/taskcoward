@@ -57,230 +57,82 @@ inline fn toggle_user(enabled: bool) !void {
 
 inline fn api_call(comptime ReqT: type) void {
     const status = brk: {
-        const req = parse_request(ReqT, std.os.environ) catch |status| break :brk status;
+        const req = parse_request(ReqT) catch |status| break :brk status;
         req.do() catch |status| break :brk status;
         return;
     };
     _ = send_response(status, .{}, .{ -1, 0, 0 }) catch std.process.exit(111);
 }
-inline fn parse_request(comptime ReqT: type, environ: [][*:0]u8) Status!ReqT {
+inline fn parse_request(comptime ReqT: type) Status!ReqT {
     var request: ReqT = undefined;
-    const envvars = enum(u8) {
-        TC_ROOT_DIR = 0,
-        TC_SNAP_MAX_DAYS = 1,
-        TC_SNAP_MAX_VERS = 2,
-        SCRIPT_NAME = 3,
-        HTTP_X_CLIENT_ID = 4,
-        PATH_INFO = 5,
-        CONTENT_TYPE = 6,
-        CONTENT_LENGTH = 7,
-        REQUEST_METHOD = 8,
-    };
-    const envmap = std.static_string_map.StaticStringMap(envvars).initComptime(.{
-        .{ "TC_ROOT_DIR", envvars.TC_ROOT_DIR },
-        .{ "TC_SNAP_MAX_DAYS", envvars.TC_SNAP_MAX_DAYS },
-        .{ "TC_SNAP_MAX_VERS", envvars.TC_SNAP_MAX_VERS },
-        .{ "SCRIPT_NAME", envvars.SCRIPT_NAME },
-        .{ "HTTP_X_CLIENT_ID", envvars.HTTP_X_CLIENT_ID },
-        .{ "PATH_INFO", envvars.PATH_INFO },
-        .{ "CONTENT_TYPE", envvars.CONTENT_TYPE },
-        .{ "CONTENT_LENGTH", envvars.CONTENT_LENGTH },
-        .{ "REQUEST_METHOD", envvars.REQUEST_METHOD },
-    });
-    var has_key: [@intFromEnum(envvars.REQUEST_METHOD) + 1]bool = undefined;
-    std.debug.print("has_key.len: {} REQUEST_METHOD+1: {}\n", .{ has_key.len, @intFromEnum(envvars.REQUEST_METHOD) + 1 });
-    @memset(has_key[0..], false);
-    var root_dir: []const u8 = undefined;
-    var user_dir: []const u8 = undefined;
-    // Iterate the environment, gathering actual values and parameters
-    for (environ) |envvar| {
-        const envvar_ = envvar[0..std.mem.indexOfSentinel(u8, 0, envvar)];
-        std.debug.print("found variable: {s}\n", .{envvar_});
-        var split = std.mem.splitScalar(u8, envvar_, '=');
-        const key_str = split.next() orelse {
-            std.debug.print("bad env var: {s}\n", .{envvar_});
-            return error.S500;
-        };
-        const val = split.next() orelse "";
-        std.debug.print("key_str: {s}\n", .{key_str});
-        const key = envmap.get(key_str) orelse continue;
-        std.debug.print("key: {}\n", .{key});
-        if (has_key[@intFromEnum(key)]) {
-            std.debug.print("duplicate key: {}\n", .{key});
-            return error.S500;
-        }
-        has_key[@intFromEnum(key)] = true;
-        switch (key) {
-            .TC_ROOT_DIR => {
-                if (val.len == 0 or val[0] != '/') {
-                    std.debug.print("bad root_dir: {s}\n", .{val});
-                    return error.S500;
-                }
-                root_dir = val;
-            },
-            .TC_SNAP_MAX_DAYS => {
-                if (@hasField(ReqT, "max_days_since_snapshot")) {
-                    @field(request, "max_days_since_snapshot") = std.fmt.parseInt(u32, val, 10) catch return error.S500;
-                }
-            },
-            .TC_SNAP_MAX_VERS => {
-                if (@hasField(ReqT, "max_versions_since_snapshot")) {
-                    @field(request, "max_versions_since_snapshot") = std.fmt.parseInt(u32, val, 10) catch return error.S500;
-                }
-            },
-            .SCRIPT_NAME => {
-                if (!eql(u8, @field(ReqT, "script_name"), val)) {
-                    std.debug.print("bad script_name: {s}\n", .{val});
-                    return error.S500;
-                }
-            },
-            .REQUEST_METHOD => {
-                if (!eql(u8, @field(ReqT, "method"), val)) {
-                    std.debug.print("bad method: {s} expected: {s}\n", .{ val, @field(ReqT, "method") });
-                    return error.S400;
-                }
-            },
-            .HTTP_X_CLIENT_ID => {
-                std.debug.print("found client_id: {s}\n", .{val});
-                @field(request, "client_id") = UUIDv8.parse(val) catch {
-                    std.debug.print("bad client_id: {s}\n", .{val});
-                    return error.S400;
-                };
-                user_dir = val;
-            },
-            .PATH_INFO => {
-                switch (@hasField(ReqT, "version_id")) {
-                    true => {
-                        if (val.len != 37) {
-                            std.debug.print("bad path_info length\n", .{});
-                            return error.S400;
-                        }
-                        if (val[0] != '/') {
-                            std.debug.print("bad path_info prefix\n", .{});
-                            return error.S400;
-                        }
-                        @field(request, "version_id") = UUIDv8.parse(val[1..]) catch |e| {
-                            std.debug.print("bad path_info uuid: {}\n", .{e});
-                            return error.S400;
-                        };
-                    },
-                    false => {
-                        if (val.len > 1 or (val.len == 1 and val[0] == '/')) {
-                            std.debug.print("bad path_info\n", .{});
-                            return error.S400;
-                        }
-                    },
-                }
-            },
-            .CONTENT_TYPE => {
-                if (!@hasDecl(ReqT, "content_type")) {
-                    std.debug.print("unexpected content_type: {s}\n", .{val});
-                    return error.S400;
-                }
-                if (!std.mem.eql(u8, @field(ReqT, "content_type"), val)) {
-                    std.debug.print("unexpected content_type: {s}\n", .{val});
-                    return error.S400;
-                }
-            },
-            .CONTENT_LENGTH => {
-                const content_length = std.fmt.parseInt(u32, val, 10) catch 0;
-                switch (@hasField(ReqT, "content_length")) {
-                    true => {
-                        if (content_length == 0) {
-                            std.debug.print("content_length too short\n", .{});
-                            return error.S400;
-                        }
-                        if (content_length > @field(ReqT, "max_expected_content")) {
-                            std.debug.print("content_length too long: {s}\n", .{val});
-                            return error.S400;
-                        }
-                        @field(request, "content_length") = content_length;
-                    },
-                    false => {
-                        if (content_length != 0) {
-                            std.debug.print("content_length too long: {s}\n", .{val});
-                            return error.S400;
-                        }
-                    },
-                }
-            },
+    const http_x_client_id: [:0]const u8 = std.posix.getenv("HTTP_X_CLIENT_ID") orelse return error.S500;
+    const client_id = UUIDv8.parse(http_x_client_id) catch return error.S400;
+    inline for (.{ "max_days_since_snapshot", "max_versions_since_snapshot", "content_length" }, .{ "TC_SNAP_MAX_DAYS", "TC_SNAP_MAX_VERS", "CONTENT_LENGTH" }, .{ 30, 300, 0 }) |fname, ename, defval| {
+        if (@hasField(ReqT, fname)) {
+            @field(request, fname) = std.process.parseEnvVarInt(ename, u32, 10) catch defval;
         }
     }
-    inline for (has_key, 0..9) |has_it, it| {
-        const key: envvars = @enumFromInt(it);
-        std.debug.print("key: {} it: {} has_it: {}\n", .{ key, it, has_it });
-        switch (key) {
-            .CONTENT_LENGTH => {
-                if (@hasDecl(ReqT, "max_expected_content") and !has_it) {
-                    std.debug.print("missing content_length\n", .{});
-                    return error.S400;
-                }
-            },
-            .CONTENT_TYPE => {
-                if (@hasDecl(ReqT, "content_type") and !has_it) {
-                    std.debug.print("missing content_type\n", .{});
-                    return error.S400;
-                }
-            },
-            .PATH_INFO => {
-                if (@hasField(ReqT, "version_id") and !has_it) {
-                    std.debug.print("missing version_id\n", .{});
-                    return error.S400;
-                }
-            },
-            .TC_SNAP_MAX_DAYS => {
-                if (@hasField(ReqT, "max_days_since_snapshot") and !has_it) {
-                    @field(request, "max_days_since_snapshot") = 30;
-                }
-            },
-            .TC_SNAP_MAX_VERS => {
-                if (@hasField(ReqT, "max_versions_since_snapshot") and !has_it) {
-                    @field(request, "max_versions_since_snapshot") = 300;
-                }
-            },
-            else => {
-                if (!has_it) {
-                    std.debug.print("missing {}\n", .{key});
-                    return error.S400;
-                }
-            },
+    if (@hasField(ReqT, "content_length")) {
+        const content_length = @field(request, "content_length");
+        if (content_length == 0) {
+            std.debug.print("content_length too short\n", .{});
+            return error.S400;
         }
-        std.debug.print("finished iteration\n", .{});
+        if (content_length > @field(ReqT, "max_expected_content")) {
+            std.debug.print("content_length too long: {}\n", .{content_length});
+            return error.S400;
+        }
     }
-    std.debug.print("finished presence check\n", .{});
+    inline for (.{ "method", "content_type", "script_name" }, .{ "REQUEST_METHOD", "CONTENT_TYPE", "SCRIPT_NAME" }) |fname, ename| {
+        if (@hasDecl(ReqT, fname)) {
+            const evar = std.posix.getenv(ename) orelse "";
+            if (!eql(u8, @field(ReqT, fname), evar)) {
+                std.debug.print("bad " ++ fname ++ ": {s} expected: " ++ @field(ReqT, "method") ++ "\n", .{evar});
+                return error.S400;
+            }
+        }
+    }
+    const path_info = std.posix.getenv("PATH_INFO") orelse "";
     if (@hasField(ReqT, "version_id")) {
-        if (!@field(request, "version_id").is_nil() and @field(request, "version_id").client_id != @field(request, "client_id").client_id) {
+        if (path_info.len != 37) {
+            std.debug.print("bad path_info length\n", .{});
+            return error.S400;
+        }
+        if (path_info[0] != '/') {
+            std.debug.print("bad path_info prefix\n", .{});
+            return error.S400;
+        }
+        const version_id = UUIDv8.parse(path_info[1..]) catch |e| {
+            std.debug.print("bad path_info uuid: {}\n", .{e});
+            return error.S400;
+        };
+        if (!version_id.is_nil() and version_id.client_id != client_id.client_id) {
             return error.S404;
         }
+        @field(request, "version_id") = version_id;
+    } else {
+        if (path_info.len > 1 or (path_info.len == 1 and path_info[0] == '/')) {
+            std.debug.print("bad path_info\n", .{});
+            return error.S400;
+        }
     }
-    std.debug.print("start buffer\n", .{});
-    var pathbuf: [512]u8 = undefined;
+    var pathbuf: [512:0]u8 = undefined;
     var pathlen: usize = 0;
-    @memcpy(pathbuf[0..root_dir.len], root_dir[0..]);
-    pathlen = root_dir.len;
-    pathbuf[pathlen] = '/';
-    pathlen += 1;
-    @memcpy(pathbuf[pathlen .. pathlen + user_dir.len], user_dir[0..]);
-    pathlen += user_dir.len;
-    std.debug.print("end buffer\n", .{});
-    // NOTE: user is enabled if I can chdir to its directory.
-    // chmod 0000 to disable a user, chmod 0700 to enable.
-    // NOTE+TODO: the only request that actually modifies the directory is `add-snapshot`.
-    // We can check for it to avoid opening with overly abarcative permissions.
-    // The other user for writing is compaction and user creation, which aren't parsed by
-    // this function.
+    const root_dir: [:0]const u8 = std.posix.getenv("TC_ROOT_DIR") orelse return error.S500;
+    @memcpy(pathbuf[0..root_dir.len], std.mem.sliceTo(root_dir, 0));
+    pathbuf[root_dir.len] = '/';
+    pathlen = root_dir.len + 1;
+    client_id.fmt(@ptrCast(pathbuf[pathlen .. pathlen + 36]));
+    pathlen += 36;
+    pathbuf[pathlen] = 0;
     const dir_opts = comptime switch (eql(u8, @typeName(ReqT), "AddSnapshotReq")) {
         true => std.posix.O{ .ACCMODE = .RDWR, .DSYNC = true },
         false => std.posix.O{},
     };
-    const to_posix = std.posix.toPosixPath(pathbuf[0..pathlen]) catch |e| blk: {
-        std.debug.print("toposixpatth: {} len: {} max: {}\n", .{ e, pathbuf[0..pathlen].len, std.posix.PATH_MAX });
-        break :blk undefined;
-    };
-    _ = std.mem.doNotOptimizeAway(to_posix);
-    // std.debug.print("toposixpatth finished: {s}", .{to_posix});
-    std.debug.print("call open\n", .{});
-    @field(request, "user_dir") = std.posix.open(pathbuf[0..pathlen], dir_opts, 0) catch |e|
+    // NOTE: use the 0-terminated version because `toPosixPath`, called
+    // by the size delimited version, seems to return `NameTooLong`
+    // spuriously on debug builds on x86. I reported a bug about it.
+    @field(request, "user_dir") = std.posix.openZ(&pathbuf, dir_opts, 0) catch |e|
         {
             std.debug.print("can't open user_dir: {s} ({})\n", .{ pathbuf[0..pathlen], e });
             return error.S400;
