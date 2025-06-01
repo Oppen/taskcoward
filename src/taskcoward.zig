@@ -721,29 +721,15 @@ const Status = error{
     S500,
 };
 // TaskCoward (client) UUIDv8 layout:
-//     0                   1                   2                   3
-// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |                           server_rand1                        |
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |          client_rand1         |  ver  |       client_rand2    |
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |var|                        client_rand3                       |
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |                           server_rand2                        |
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// | TIMESTAMP | CLIENT_RAND1 | VER | CLIENT_RAND2 | VAR | CLIENT_RAND3 | SERVER_RAND |
+//   32 bits     16 bits       0b100  13 bits       0b10   30 bits        32 bits
 // TaskCoward (version) UUIDv8 layout:
-//     0                   1                   2                   3
-// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |                           unix_ts_secs                        |
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |          client_rand1         |  ver  |       client_rand2    |
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |var|                        client_rand3                       |
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |                           sequence_number                     |
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// | TIMESTAMP | CLIENT_RAND1 | VER | CLIENT_RAND2 | VAR | CLIENT_RAND3 | SEQUENCE NUMBER |
+//   32 bits     16 bits       0b100  13 bits       0b10   30 bits        32 bits
+// For all version UUIDs, CLIENT_RAND1, CLIENT_RAND2 and CLIENT_RAND3
+// MUST match the same fields in the associated client UUID.
+// NB: this means the middle 64 bits need to match, given the remaining
+// bits mandatorily match due to UUIDv8 requirements.
 const UUIDv8 = packed struct(u128) {
     client_id: u64,
     timestamp: u32,
