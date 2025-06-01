@@ -5,3 +5,5 @@
 - Make a general review of file handling, specially use more O_TMPFILE, check that everything is O_SYNC, etc.
 - Snapshots seems to not be performing the `rename` correctly.
 - Maybe use timed locks to report timeouts while waiting on a different process.
+- Finish the compaction and user creation code.
+- On Linux use `copy_file_range` for compaction.
