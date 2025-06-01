@@ -145,7 +145,6 @@ inline fn parse_request(comptime ReqT: type) Status!ReqT {
 fn send_response(status: Status, headers: anytype, body: struct { fd_t, u64, u64 }) !void {
     var buffer: [16 << 10]u8 = undefined;
     var len: usize = 0;
-    // TODO: now that we use CGI, this can simply be an fmt call.
     const status_line = switch (status) {
         error.S200 => "Status: 200\r\n",
         error.S400 => "Status: 400\r\n",
