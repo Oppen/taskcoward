@@ -6,7 +6,7 @@ TaskCoward tries to be the smallest, least resource hungry sync server for the T
 
 You'll need an HTTP server with support for CGI. My recommendation is `tipidee`.
 Run `zig build`, then copy the binaries to the desired root directory for your deployment of TaskCoward, preferably under the `bin` subdirectory.
-Then, make sure the programs have access to the path to TaskCoward's root by setting the `TC_ROOT_DIR` enviroment variable, and that the `SCRIPT_NAME` variable for each program matches the pattern `/v1/client/<program>` (or `v1/client/program/<UUID>` for endpoints receiving a version).
+Then, make sure the programs have access to the path to TaskCoward's root by setting the `TC_ROOT_DIR` enviroment variable, and that the `SCRIPT_NAME` variable for each program matches the pattern `/v1/client/<program>`.
 In `tipidee`, I do that by creating a directory `v1/client/` inside the domain's document root with scripts following the template:
 ```sh
 #!/usr/bin/execlineb -P
