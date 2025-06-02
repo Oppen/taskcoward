@@ -1,9 +1,7 @@
-- Save baked 200 responses in the blobs file.
-- Write a splice/sendfile helper to read from and write to pipes.
 - Cleanups.
 - Make debug data only compile on debug builds to ensure release binaries are tiny.
 - Make a general review of file handling, specially use more O_TMPFILE, check that everything is O_SYNC, etc.
 - Snapshots seems to not be performing the `rename` correctly.
 - Maybe use timed locks to report timeouts while waiting on a different process.
-- Finish the compaction and user creation code.
-- On Linux use `copy_file_range` for compaction.
+- For most 500 codes we can simply abort the CGI script and let the server report the internal error.
+- In debug mode we can try to print a backtrace on aborts.
