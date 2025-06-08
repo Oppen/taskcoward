@@ -1,7 +1,13 @@
 - Cleanups.
 - Make debug data only compile on debug builds to ensure release binaries are tiny.
-- Make a general review of file handling, specially use more O_TMPFILE, check that everything is O_SYNC, etc.
+- Make a general review of file handling, specially use more `O_TMPFILE`, check that everything is `O_SYNC`, etc.
 - Snapshots seems to not be performing the `rename` correctly.
 - Maybe use timed locks to report timeouts while waiting on a different process.
 - For most 500 codes we can simply abort the CGI script and let the server report the internal error.
 - In debug mode we can try to print a backtrace on aborts.
+- Maybe use one of the following perfect hash function generators to match env vars:
+  - https://cmph.sourceforge.net
+  - http://ilan.schnell-web.net/prog/perfect-hash/
+  - https://github.com/rurban/nbperf
+  - https://www.gnu.org/software/gperf/manual/gperf.html#Search-Structures
+  - https://andrewkelley.me/post/string-matching-comptime-perfect-hashing-zig.html

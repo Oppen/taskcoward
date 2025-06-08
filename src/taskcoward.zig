@@ -47,26 +47,34 @@ pub fn cli_compact_db() !void {
 }
 pub fn cli_create_user() !void {
     const root_dir_path = std.posix.getenv("TC_ROOT_DIR").?;
-    const uuid_bin = std.crypto.random.int(u128) & 0xffffffffffff8fffbfffffffffffffff;
+    const root_dir = try std.posix.openZ(root_dir_path, .{ .DIRECTORY = true, .SYNC = true }, 0);
+    const uuid_bin = (std.crypto.random.int(u128) & 0xffffffffffff8fffbfffffffffffffff) | 0x00000000000080008000000000000000;
     const uuid = UUIDv8.from_binary(uuid_bin) catch unreachable;
-    var buffer: [std.posix.PATH_MAX:0]u8 = undefined;
-    const user_dir_path = try std.fmt.bufPrintZ(buffer[0..], "{s}/{}", .{ root_dir_path, uuid });
-    const user_dir = try std.posix.openZ(user_dir_path, .{ .DIRECTORY = true, .SYNC = true }, 0);
+    var buffer: [36 + ".disabled".len + 1:0]u8 = undefined;
+    const user_dir_path = try std.fmt.bufPrintZ(&buffer, "{}.disabled", .{uuid});
+    std.debug.print("directory: {s}\n", .{user_dir_path});
+    try std.posix.mkdiratZ(root_dir, user_dir_path, 0o700);
+    const user_dir = try std.posix.openatZ(root_dir, user_dir_path, .{ .DIRECTORY = true, .SYNC = true }, 0);
     defer std.posix.close(user_dir);
+    comptime {
+        std.debug.assert(std.hash.Crc32.hash("\x00" ** 28) == 0x807077e9);
+    }
     inline for (
         .{ "metadata", "index-00000000-0000000000000000", "blobs-00000000-0000000000000000", "snapshot", "write.lock" },
-        .{ "00000000-0000000000000000", "\x00" ** 28 ++ "\x80\x70\x77\xe9", "", "\x00" ** 16 ++ "Status: 404\r\nContent-Length: 0\r\n\r\n", "" },
+        .{ "00000000-0000000000000000", "\x00" ** 28 ++ "\xe9\x77\x70\x80", "", "\x00" ** 16 ++ "Status: 404\r\nContent-Length: 0\r\n\r\n", "" },
     ) |fname, idata| {
-        const fd = try std.posix.openatZ(user_dir, "", .{ .CREAT = true, .SYNC = true, .TMPFILE = true, .ACCMODE = .RDWR }, 0o700);
+        const fd = try std.posix.openatZ(user_dir, fname, .{ .CREAT = true, .ACCMODE = .WRONLY, .SYNC = true, .EXCL = true }, 0o600);
         defer std.posix.close(fd);
         if (idata.len != try std.posix.write(fd, idata[0..])) {
             return error.ShortWrite;
         }
-        try std.posix.renameatZ(fd, "", user_dir, fname);
     }
 
     // Created successfully, enable
-    try std.posix.fchmod(user_dir, 0o700);
+    var enabled_buffer: [36 + 1:0]u8 = undefined;
+    const user_dir_path_enabled = try std.fmt.bufPrintZ(&enabled_buffer, "{}", .{uuid});
+    try std.posix.renameatZ(root_dir, user_dir_path, root_dir, user_dir_path_enabled);
+    try std.io.getStdOut().writer().print("Successfully created user {}\n", .{uuid});
 }
 pub fn cli_enable_user() !void {
     try toggle_user(true);
@@ -97,18 +105,19 @@ inline fn parse_request(comptime ReqT: type) ReqT {
     var request: ReqT = undefined;
     const http_x_client_id: [:0]const u8 = std.posix.getenv("HTTP_X_CLIENT_ID") orelse return send_status(500);
     const client_id = UUIDv8.parse(http_x_client_id) catch return send_status(400);
+    request.client_id = client_id;
     inline for (.{ "max_days_since_snapshot", "max_versions_since_snapshot", "content_length" }, .{ "TC_SNAP_MAX_DAYS", "TC_SNAP_MAX_VERS", "CONTENT_LENGTH" }, .{ 30, 300, 0 }) |fname, ename, defval| {
         if (@hasField(ReqT, fname)) {
             @field(request, fname) = std.process.parseEnvVarInt(ename, u32, 10) catch defval;
         }
     }
     if (@hasField(ReqT, "content_length")) {
-        const content_length = @field(request, "content_length");
+        const content_length = request.content_length;
         if (content_length == 0) {
             std.debug.print("content_length too short\n", .{});
             return send_status(400);
         }
-        if (content_length > @field(ReqT, "max_expected_content")) {
+        if (content_length > ReqT.max_expected_content) {
             std.debug.print("content_length too long: {}\n", .{content_length});
             return send_status(400);
         }
@@ -117,7 +126,7 @@ inline fn parse_request(comptime ReqT: type) ReqT {
         if (@hasDecl(ReqT, fname)) {
             const evar = std.posix.getenv(ename) orelse "";
             if (!eql(u8, @field(ReqT, fname), evar)) {
-                std.debug.print("bad " ++ fname ++ ": {s} expected: " ++ @field(ReqT, "method") ++ "\n", .{evar});
+                std.debug.print("bad " ++ ename ++ ": {s} expected: " ++ @field(ReqT, fname) ++ "\n", .{evar});
                 return send_status(400);
             }
         }
@@ -139,7 +148,7 @@ inline fn parse_request(comptime ReqT: type) ReqT {
         if (!version_id.is_nil() and version_id.client_id != client_id.client_id) {
             return send_status(400);
         }
-        @field(request, "version_id") = version_id;
+        request.version_id = version_id;
     } else {
         if (path_info.len > 1 or (path_info.len == 1 and path_info[0] == '/')) {
             std.debug.print("bad path_info\n", .{});
@@ -158,7 +167,7 @@ inline fn parse_request(comptime ReqT: type) ReqT {
     // NOTE: use the 0-terminated version because `toPosixPath`, called
     // by the size delimited version, seems to return `NameTooLong`
     // spuriously on debug builds on x86. I reported a bug about it.
-    @field(request, "user_dir") = std.posix.openZ(&pathbuf, dir_opts, 0) catch |e|
+    request.user_dir = std.posix.openZ(&pathbuf, dir_opts, 0) catch |e|
         {
             std.debug.print("can't open user_dir: {s} ({})\n", .{ pathbuf[0..pathlen], e });
             return send_status(400);
@@ -166,24 +175,11 @@ inline fn parse_request(comptime ReqT: type) ReqT {
     std.debug.print("request fully processed\n", .{});
     return request;
 }
-fn fmt_headers(buffer: []u8, headers: anytype) usize {
-    const HeadersType = @TypeOf(headers);
-    const type_info = @typeInfo(HeadersType);
-    if (type_info != .@"struct" or !type_info.@"struct".is_tuple) {
-        @compileError("expected tuple or struct argument, found " ++ @typeName(HeadersType));
-    }
-    var len: usize = 0;
-    inline for (type_info.@"struct".fields) |field| {
-        const f_type_info = @typeInfo(field.type);
-        if (f_type_info != .@"struct" or f_type_info.@"struct".fields.len != 2) {
-            @compileError("expected tuple of two elements, found " ++ @typeName(field.type));
-        }
-        const fields = f_type_info.@"struct".fields;
-        const name, const value = .{ fields[0], fields[1] };
-        if (!name.is_comptime) {
-            @compileError("expected comptime string");
-        }
-        const fmt = std.fmt.bufPrint(buffer[len..], "{s}: {any}\r\n", .{ name.name, value.name }) catch unreachable;
+fn fmt_headers(buffer: []u8, headers: anytype) u32 {
+    var len: u32 = 0;
+    inline for (headers) |header| {
+        const fmt_val = if (header.len >= 3) header[2] else "";
+        const fmt = std.fmt.bufPrint(buffer[len..], "{s}: {" ++ fmt_val ++ "}\r\n", .{ header[0], header[1] }) catch unreachable;
         len += fmt.len;
     }
     @memcpy(buffer[len .. len + 2], "\r\n");
@@ -194,6 +190,8 @@ fn send_response(status: comptime_int, headers: anytype) void {
     var buffer: [1024]u8 = undefined;
     const len = fmt_headers(buffer[0..], .{
         .{ "Status", status },
+        .{ "Content-Length", 0 },
+        .{ "Content-Type", "text/plain", "s" },
     } ++ headers);
     const stdout = std.io.getStdOut();
     stdout.writeAll(buffer[0..len]) catch std.process.abort();
@@ -232,16 +230,19 @@ inline fn recv_blob(fd: fd_t, start: u64, length: u32) !void {
     while (remaining != 0) {
         // Use the Linux version directly because we need to pass
         // a null offset for it to work with pipes.
-        const rc = std.os.linux.sendfile(fd, stdin, null, remaining);
+        const rc = std.os.linux.syscall6(.splice, @as(usize, @bitCast(@as(isize, stdin))), 0, @as(usize, @bitCast(@as(isize, fd))), 0, length, 0);
         const errno = std.posix.errno(rc);
+        std.debug.print("recv: errno: {}\n", .{errno});
+        // FIXME: sendfile gives EINVAL
         switch (errno) {
             .SUCCESS => {
-                remaining -= rc;
+                remaining -= @truncate(rc);
             },
             else => return error.SendFileError, //FIXME: preserve some data
         }
     }
 }
+
 fn copy_file(in: fd_t, out: fd_t, start: u64) !void {
     var offset = start;
     const stat = try std.posix.fstat(in);
@@ -259,11 +260,11 @@ fn copy_file(in: fd_t, out: fd_t, start: u64) !void {
 }
 fn pwriteAll(fd: fd_t, offset: u64, data: []const u8) !void {
     var remaining = data.len;
-    var total: usize = 0;
+    var total: u32 = 0;
     while (remaining != 0) {
         const written = try std.posix.pwrite(fd, data[total..], offset + total);
-        remaining -= written;
-        total += written;
+        remaining -= @truncate(written);
+        total += @truncate(written);
     }
 }
 
@@ -313,7 +314,7 @@ const AddVersionReq = struct {
     max_versions_since_snapshot: u32,
     client_id: UUIDv8,
     version_id: UUIDv8,
-    content_length: usize,
+    content_length: u32,
     user_dir: fd_t,
 
     pub fn do(self: *const AddVersionReq) void {
@@ -361,7 +362,7 @@ const AddVersionReq = struct {
         var header_buffer: [1024]u8 = undefined;
         const header_len = fmt_headers(header_buffer[0..], .{
             .{ "Status", 200 },
-            .{ "Content-Type", AddVersionReq.content_type },
+            .{ "Content-Type", AddVersionReq.content_type, "s" },
             .{ "Content-Length", self.content_length },
             .{ "X-Version-Id", new_version },
             .{ "X-Parent-Version-Id", self.version_id },
@@ -417,7 +418,7 @@ const SnapshotReq = struct {
     user_dir: fd_t,
 
     pub fn do(self: *const SnapshotReq) void {
-        const snapshot = std.posix.openat(self.user_dir, "snapshot", .{}, 0) catch return send_status(404);
+        const snapshot = std.posix.openatZ(self.user_dir, "snapshot", .{}, 0) catch return send_status(404);
         const stat = std.posix.fstat(snapshot) catch return send_status(500);
         const file_length: u32 = @truncate(@abs(stat.size));
         // NOTE: skip the UUID
@@ -432,7 +433,7 @@ const AddSnapshotReq = struct {
     pub const max_versions_back = 5;
     client_id: UUIDv8,
     version_id: UUIDv8,
-    content_length: usize,
+    content_length: u32,
     user_dir: fd_t,
 
     pub fn do(self: *const AddSnapshotReq) void {
@@ -453,9 +454,9 @@ const AddSnapshotReq = struct {
         // NOTE: an O_TMPFILE would be desirable, but apparently replacing an existing file with it is not supported.
         // It might still be useful to ensure any collision is with a valid snapshot and not a broken one.
         // TODO: use bufPrintZ and open*Z where appropriate.
-        var pathbuf: [45]u8 = undefined;
-        _ = std.fmt.bufPrint(pathbuf[0..], "snapshot-{}", .{self.version_id}) catch unreachable;
-        const new_snapshot = std.posix.openat(self.user_dir, pathbuf[0..], .{ .CREAT = true, .EXCL = true, .DSYNC = true, .ACCMODE = .WRONLY }, 0) catch |e| switch (e) {
+        var pathbuf: [45:0]u8 = undefined;
+        _ = std.fmt.bufPrintZ(&pathbuf, "snapshot-{}", .{self.version_id}) catch unreachable;
+        const new_snapshot = std.posix.openatZ(self.user_dir, pathbuf[0..], .{ .CREAT = true, .EXCL = true, .DSYNC = true, .ACCMODE = .WRONLY }, 0o600) catch |e| switch (e) {
             error.PathAlreadyExists => {
                 return send_status(200);
             },
@@ -471,7 +472,7 @@ const AddSnapshotReq = struct {
         @memcpy(hdr[0..16], std.mem.asBytes(&self.version_id.binary()));
         const hdr_len = 16 + fmt_headers(hdr[16..], .{
             .{ "Status", 200 },
-            .{ "Content-Type", AddSnapshotReq.content_type },
+            .{ "Content-Type", AddSnapshotReq.content_type, "s" },
             .{ "Content-Length", self.content_length },
         });
         pwriteAll(new_snapshot, 0, hdr[0..hdr_len]) catch |e| {
@@ -494,11 +495,12 @@ const AddSnapshotReq = struct {
             std.debug.print("rename failed: {}\n", .{e});
             return send_status(500);
         };
+        return send_status(200);
     }
 };
 
 fn snapshot_version(user_dir: fd_t, lock: bool) !UUIDv8 {
-    const snapshot = try std.posix.openat(user_dir, "snapshot", .{}, 0);
+    const snapshot = try std.posix.openatZ(user_dir, "snapshot", .{}, 0);
     // FIXME: I want to **keep** the lock!
     defer std.posix.close(snapshot);
     if (lock) {
@@ -512,23 +514,24 @@ fn snapshot_version(user_dir: fd_t, lock: bool) !UUIDv8 {
 }
 // Returns (index_fd, blobs_fd, index_start, blobs_start)
 fn opendb(user_dir: fd_t, options: std.posix.O, with_blobs: bool) !struct { fd_t, fd_t, u32, u64 } {
-    const ro_lock = try std.posix.openat(user_dir, "metadata", .{}, 0);
+    const ro_lock = try std.posix.openatZ(user_dir, "metadata", .{}, 0);
     defer std.posix.close(ro_lock);
     try std.posix.flock(ro_lock, std.posix.LOCK.SH);
-    var pathbuf: [31]u8 = undefined;
+    var pathbuf: [31:0]u8 = undefined;
     if (pathbuf.len - 6 != try std.posix.read(ro_lock, pathbuf[6..])) {
         return error.ShortRead;
     }
+    pathbuf[31] = 0;
     const index_start = try std.fmt.parseInt(u32, pathbuf[6..14], 16);
     const blobs_start = try std.fmt.parseInt(u64, pathbuf[15..31], 16);
     @memcpy(pathbuf[0..6], "index-");
-    const index_fd = try std.posix.openat(user_dir, pathbuf[0..], options, 0);
+    const index_fd = try std.posix.openatZ(user_dir, &pathbuf, options, 0);
     if (!with_blobs) {
         return .{ index_fd, -1, index_start, blobs_start };
     }
     errdefer std.posix.close(index_fd);
     @memcpy(pathbuf[0..6], "blobs-");
-    const blobs_fd = try std.posix.openat(user_dir, pathbuf[0..], options, 0);
+    const blobs_fd = try std.posix.openatZ(user_dir, &pathbuf, options, 0);
     return .{ index_fd, blobs_fd, index_start, blobs_start };
 }
 // Returns (index_fd, index_start)
@@ -543,7 +546,7 @@ fn opendb_ro(user_dir: fd_t) !struct { fd_t, fd_t, u32, u64 } {
 }
 // Returns (rw_lock_fd, index_fd, blobs_fd, index_start, blobs_start)
 fn opendb_rw(user_dir: fd_t) !struct { fd_t, fd_t, fd_t, u32, u64 } {
-    const rw_lock = try std.posix.openat(user_dir, "write.lock", .{}, 0);
+    const rw_lock = try std.posix.openatZ(user_dir, "write.lock", .{}, 0);
     errdefer std.posix.close(rw_lock);
     try std.posix.flock(rw_lock, std.posix.LOCK.EX);
     const db = try opendb(user_dir, .{ .DSYNC = true, .ACCMODE = .RDWR }, true);
