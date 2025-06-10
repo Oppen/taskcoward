@@ -368,7 +368,7 @@ const AddVersionReq = struct {
             .{ "X-Parent-Version-Id", self.version_id },
         });
 
-        var start = records[0].offset - blobs_start + records[0].length;
+        var start = record.offset - blobs_start + record.length;
         pwriteAll(blobs_fd, start, header_buffer[0..header_len]) catch |e| {
             std.debug.print("write failed: {}\n", .{e});
             return send_status(500);
@@ -381,7 +381,7 @@ const AddVersionReq = struct {
 
         var new_record: Record = .{
             .uuid = new_version.binary(),
-            .offset = records[0].offset + records[0].length,
+            .offset = record.offset + record.length,
             .length = self.content_length + header_len,
             .crc32 = undefined,
         };
@@ -474,6 +474,7 @@ const AddSnapshotReq = struct {
             .{ "Status", 200 },
             .{ "Content-Type", AddSnapshotReq.content_type, "s" },
             .{ "Content-Length", self.content_length },
+            .{ "X-Version-Id", self.version_id },
         });
         pwriteAll(new_snapshot, 0, hdr[0..hdr_len]) catch |e| {
             std.debug.print("failed to write header: {}\n", .{e});
